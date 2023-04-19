@@ -1,10 +1,8 @@
-package chatcompletionstream
+package chatcompletion
 
 import (
 	"context"
 	"errors"
-	"io"
-	"strings"
 
 	"github.com/diegoalmda/chatgpt-chat-microservice/chatservice/internal/domain/entity"
 	"github.com/diegoalmda/chatgpt-chat-microservice/chatservice/internal/domain/gateway"
@@ -41,14 +39,12 @@ type ChatCompletionOutputDTO struct {
 type ChatCompletionUseCase struct {
 	ChatGateway  gateway.ChatGateway
 	OpenAIClient *openai.Client
-	Stream       chan ChatCompletionOutputDTO
 }
 
-func NewChatCompletionUseCase(chatGateway gateway.ChatGateway, openAIClient *openai.Client, stream chan ChatCompletionOutputDTO) *ChatCompletionUseCase {
+func NewChatCompletionUseCase(chatGateway gateway.ChatGateway, openAIClient *openai.Client) *ChatCompletionUseCase {
 	return &ChatCompletionUseCase{
 		ChatGateway:  chatGateway,
 		OpenAIClient: openAIClient,
-		Stream:       stream,
 	}
 }
 
@@ -56,12 +52,10 @@ func (uc *ChatCompletionUseCase) Execute(ctx context.Context, input ChatCompleti
 	chat, err := uc.ChatGateway.FindChatByID(ctx, input.ChatID)
 	if err != nil {
 		if err.Error() == "chat not found" {
-			// create new chat (entity)
 			chat, err = createNewChat(input)
 			if err != nil {
 				return nil, errors.New("error creating new chat: " + err.Error())
 			}
-			// save on database
 			err = uc.ChatGateway.CreateChat(ctx, chat)
 			if err != nil {
 				return nil, errors.New("error persisting new chat: " + err.Error())
@@ -88,7 +82,7 @@ func (uc *ChatCompletionUseCase) Execute(ctx context.Context, input ChatCompleti
 		})
 	}
 
-	resp, err := uc.OpenAIClient.CreateChatCompletionStream(
+	resp, err := uc.OpenAIClient.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
 			Model:            chat.Config.Model.Name,
@@ -99,33 +93,13 @@ func (uc *ChatCompletionUseCase) Execute(ctx context.Context, input ChatCompleti
 			PresencePenalty:  chat.Config.PresencePenalty,
 			FrequencyPenalty: chat.Config.FrequencyPenalty,
 			Stop:             chat.Config.Stop,
-			Stream:           true,
 		},
 	)
 	if err != nil {
 		return nil, errors.New("error openai: " + err.Error())
 	}
 
-	var fullResponse strings.Builder
-
-	for {
-		response, err := resp.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, errors.New("error streaming response: " + err.Error())
-		}
-		fullResponse.WriteString(response.Choices[0].Delta.Content)
-		r := ChatCompletionOutputDTO{
-			ChatID:  chat.ID,
-			UserID:  input.UserID,
-			Content: fullResponse.String(),
-		}
-		uc.Stream <- r
-	}
-
-	assistant, err := entity.NewMessage("assistant", fullResponse.String(), chat.Config.Model)
+	assistant, err := entity.NewMessage("assistant", resp.Choices[0].Message.Content, chat.Config.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +116,7 @@ func (uc *ChatCompletionUseCase) Execute(ctx context.Context, input ChatCompleti
 	output := &ChatCompletionOutputDTO{
 		ChatID:  chat.ID,
 		UserID:  input.UserID,
-		Content: fullResponse.String(),
+		Content: resp.Choices[0].Message.Content,
 	}
 
 	return output, nil
